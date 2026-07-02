@@ -1,5 +1,4 @@
 name: Auto merge Exercism Solutions Syncer PRs
-
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -8,11 +7,9 @@ on:
   check_suite:
     types: [completed]
   workflow_dispatch:
-
 permissions:
   contents: write
   pull-requests: write
-
 jobs:
   merge:
     runs-on: ubuntu-latest
@@ -23,11 +20,20 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const BOT = 'exercism-solutions-syncer[bot]';
 
             async function tryMerge(pull_number) {
-              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+              let pr;
+              // mergeable_state는 GitHub가 백그라운드로 계산하므로
+              // 'unknown'이면 확정될 때까지 재조회
+              for (let i = 0; i < 6; i++) {
+                ({ data: pr } = await github.rest.pulls.get({ owner, repo, pull_number }));
+                if (pr.mergeable_state !== 'unknown') break;
+                core.info(`#${pull_number} mergeable_state=unknown, retrying (${i + 1}/6)`);
+                await new Promise(r => setTimeout(r, 3000));
+              }
 
-              if (pr.user.login !== 'exercism-solutions-syncer[bot]') {
+              if (pr.user.login !== BOT) {
                 core.info(`#${pull_number} skip: author=${pr.user.login}`);
                 return;
               }
@@ -39,7 +45,6 @@ jobs:
                 core.info(`#${pull_number} skip: mergeable_state=${pr.mergeable_state}`);
                 return;
               }
-
               try {
                 await github.rest.pulls.merge({
                   owner,
@@ -54,7 +59,6 @@ jobs:
             }
 
             let numbers = [];
-
             if (context.eventName === 'pull_request' || context.eventName === 'pull_request_review') {
               const n = context.payload.pull_request?.number;
               if (n) numbers.push(n);
@@ -69,13 +73,11 @@ jobs:
                 per_page: 100
               });
               numbers = prs
-                .filter(pr => pr.user.login === 'exercism-solutions-syncer[bot]')
+                .filter(pr => pr.user.login === BOT)
                 .map(pr => pr.number);
             }
-
             numbers = [...new Set(numbers)];
             core.info(`target PRs: ${numbers.join(', ') || '(none)'}`);
-
             for (const n of numbers) {
               await tryMerge(n);
             }
