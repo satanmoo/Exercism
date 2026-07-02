@@ -13,71 +13,69 @@ permissions:
   contents: write
   pull-requests: write
 
-concurrency:
-  group: auto-merge-exercism-syncer-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: false
-
 jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Find target PR number
-        id: prnum
-        uses: actions/github-script@v7
-        with:
-          script: |
-            let prNumber = null;
-
-            if (context.eventName === 'pull_request' || context.eventName === 'pull_request_review') {
-              prNumber = context.payload.pull_request?.number ?? null;
-            } else if (context.eventName === 'check_suite') {
-              const prs = context.payload.check_suite?.pull_requests ?? [];
-              prNumber = prs.length > 0 ? prs[0].number : null;
-            }
-
-            core.setOutput('number', prNumber ? String(prNumber) : '');
-
-      - name: Merge PR if eligible
-        if: ${{ steps.prnum.outputs.number != '' }}
+      - name: Merge eligible PR(s)
         uses: actions/github-script@v7
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const pull_number = Number('${{ steps.prnum.outputs.number }}');
 
-            // PR 상세 조회
-            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            async function tryMerge(pull_number) {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
 
-            // 1) 작성자 필터
-            if (pr.user.login !== 'exercism-solutions-syncer[bot]') {
-              core.info(`skip: author is ${pr.user.login}`);
-              return;
+              if (pr.user.login !== 'exercism-solutions-syncer[bot]') {
+                core.info(`#${pull_number} skip: author=${pr.user.login}`);
+                return;
+              }
+              if (pr.draft) {
+                core.info(`#${pull_number} skip: draft`);
+                return;
+              }
+              if (!['clean', 'unstable'].includes(pr.mergeable_state)) {
+                core.info(`#${pull_number} skip: mergeable_state=${pr.mergeable_state}`);
+                return;
+              }
+
+              try {
+                await github.rest.pulls.merge({
+                  owner,
+                  repo,
+                  pull_number,
+                  merge_method: 'squash'
+                });
+                core.info(`#${pull_number} merged`);
+              } catch (e) {
+                core.warning(`#${pull_number} merge failed: ${e.message}`);
+              }
             }
 
-            // 2) draft 제외
-            if (pr.draft) {
-              core.info('skip: draft PR');
-              return;
-            }
+            let numbers = [];
 
-            // 3) 머지 가능 상태 확인
-            // mergeable_state: clean, unstable, blocked, behind, dirty, unknown ...
-            if (!['clean', 'unstable'].includes(pr.mergeable_state)) {
-              core.info(`skip: mergeable_state=${pr.mergeable_state}`);
-              return;
-            }
-
-            // 4) 실제 머지 시도 (레포에서 허용된 방식으로: squash)
-            try {
-              await github.rest.pulls.merge({
+            if (context.eventName === 'pull_request' || context.eventName === 'pull_request_review') {
+              const n = context.payload.pull_request?.number;
+              if (n) numbers.push(n);
+            } else if (context.eventName === 'check_suite') {
+              const prs = context.payload.check_suite?.pull_requests ?? [];
+              if (prs.length > 0) numbers.push(prs[0].number);
+            } else if (context.eventName === 'workflow_dispatch') {
+              const prs = await github.paginate(github.rest.pulls.list, {
                 owner,
                 repo,
-                pull_number,
-                merge_method: 'squash'
+                state: 'open',
+                per_page: 100
               });
-              core.info(`merged #${pull_number}`);
-            } catch (e) {
-              // 보호규칙/required checks 미충족 등은 여기로 옴
-              core.warning(`merge failed for #${pull_number}: ${e.message}`);
+              numbers = prs
+                .filter(pr => pr.user.login === 'exercism-solutions-syncer[bot]')
+                .map(pr => pr.number);
+            }
+
+            numbers = [...new Set(numbers)];
+            core.info(`target PRs: ${numbers.join(', ') || '(none)'}`);
+
+            for (const n of numbers) {
+              await tryMerge(n);
             }
